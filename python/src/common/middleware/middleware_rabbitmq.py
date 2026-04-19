@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
-    def __init__(self, host: str, queue_name: str):
+    def __init__(self, host: str, queue_name: str, prefetch_count: int = 10):
         self.host = host
         self.queue_name = queue_name
+        self._prefetch_count = prefetch_count
         self.connection = None
         self.channel = None
 
@@ -50,7 +51,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
             if not self.channel:
                 raise MessageMiddlewareDisconnectedError("No active connection to RabbitMQ")
 
-            self.channel.basic_qos(prefetch_count=10)
+            self.channel.basic_qos(prefetch_count=self._prefetch_count)
 
             logger.info(f"Waiting messages on queue {self.queue_name}...")
             self.channel.basic_consume(
@@ -95,6 +96,12 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
             raise MessageMiddlewareCloseError(f"Error closing connection: {e}")
+
+    def schedule_on_consumer_thread(self, fn):
+        if not self.connection:
+            raise MessageMiddlewareDisconnectedError("No active connection to RabbitMQ")
+        self.connection.add_callback_threadsafe(fn)
+
 
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
 

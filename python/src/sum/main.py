@@ -1,5 +1,6 @@
 import logging
 import os
+import queue
 import signal
 import threading
 import zlib
@@ -23,7 +24,7 @@ class SumFilter:
         self._completed_flush = set()
 
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            self._mom_host, self._input_queue_name
+            self._mom_host, self._input_queue_name, prefetch_count=1 if self._sum_amount > 1 else 10
         )
 
         self.data_output_exchanges = []
@@ -38,8 +39,10 @@ class SumFilter:
         self._fanout_pub = None
         self._fanout_sub = None
         self._coord_exchange_name = f"{self._sum_prefix}{SUM_EOF_FANOUT}"
+        self._coord_queue = None
 
         if self._sum_amount > 1:
+            self._coord_queue = queue.Queue()
             self._fanout_pub = middleware.MessageMiddlewareFanoutRabbitMQ(
                 self._mom_host, self._coord_exchange_name
             )
@@ -51,7 +54,11 @@ class SumFilter:
             )
 
     def _aggregator_shard(self, fruit: str) -> int:
-        return 0 if self._aggregation_amount <= 0 else zlib.crc32(fruit.encode("utf-8")) % self._aggregation_amount
+        return (
+            0
+            if self._aggregation_amount <= 0
+            else zlib.crc32(fruit.encode("utf-8")) % self._aggregation_amount
+        )
 
     def _publish_coord_flush(self, client_token: str):
         self._fanout_pub.send(message_protocol.internal.serialize([client_token]))
@@ -82,11 +89,24 @@ class SumFilter:
         else:
             self._publish_coord_flush(client_token)
 
-    def _on_coord_flush(self, message, ack, nack):
+    def _drain_coord_messages(self):
+        if self._coord_queue is None:
+            return
+        while True:
+            try:
+                body = self._coord_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fields = message_protocol.internal.deserialize(body)
+                self._flush_client(fields[0])
+            except Exception:
+                logging.exception("Failed to process coordination flush message")
+
+    def _on_fanout_message(self, message, ack, nack):
         try:
-            fields = message_protocol.internal.deserialize(message)
-            client_token = fields[0]
-            self._flush_client(client_token)
+            self._coord_queue.put(message)
+            self.input_queue.schedule_on_consumer_thread(self._drain_coord_messages)
             ack()
         except Exception:
             nack()
@@ -106,12 +126,13 @@ class SumFilter:
                     )
             elif len(fields) == 1:
                 self._handle_gateway_eof(fields[0])
+            self._drain_coord_messages()
             ack()
         except Exception:
             nack()
 
-    def _coord_loop(self):
-        self._fanout_sub.start_consuming(self._on_coord_flush)
+    def _fanout_listen(self):
+        self._fanout_sub.start_consuming(self._on_fanout_message)
 
     def _shutdown(self, signum, frame):
         logging.info("Sum received shutdown signal")
@@ -130,7 +151,7 @@ class SumFilter:
         signal.signal(signal.SIGINT, self._shutdown)
 
         if self._sum_amount > 1:
-            threading.Thread(target=self._coord_loop, daemon=True).start()
+            threading.Thread(target=self._fanout_listen, daemon=True).start()
 
         try:
             self.input_queue.start_consuming(self.process_data_messsage)
