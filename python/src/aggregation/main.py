@@ -1,21 +1,17 @@
-import os
 import logging
-import bisect
+import os
 
-from common import middleware, message_protocol, fruit_item
+from common import fruit_item, message_protocol, middleware
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
-SUM_PREFIX = os.environ["SUM_PREFIX"]
-AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
 
 class AggregationFilter:
-
     def __init__(self):
         self.input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
@@ -23,42 +19,72 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top = []
+        self._by_client = {}
+        self._eof_seen = {}
 
-    def _process_data(self, fruit, amount):
+    def _partial_pairs(self, client_token: str):
+        bucket = self._by_client.get(client_token, {})
+        items = sorted(bucket.values())
+        items.reverse()
+        chunk = items[:TOP_SIZE]
+        return [[fi.fruit, fi.amount] for fi in chunk]
+
+    def _process_data(self, client_token: str, fruit: str, amount: int):
         logging.info("Processing data message")
-        for i in range(len(self.fruit_top)):
-            if self.fruit_top[i].fruit == fruit:
-                self.fruit_top[i] = self.fruit_top[i] + fruit_item.FruitItem(
-                    fruit, amount
-                )
-                return
-        bisect.insort(self.fruit_top, fruit_item.FruitItem(fruit, amount))
+        bucket = self._by_client.setdefault(client_token, {})
+        current = bucket.get(fruit, fruit_item.FruitItem(fruit, 0))
+        bucket[fruit] = current + fruit_item.FruitItem(fruit, amount)
 
-    def _process_eof(self):
-        logging.info("Received EOF")
-        fruit_chunk = list(self.fruit_top[-TOP_SIZE:])
-        fruit_chunk.reverse()
-        fruit_top = list(
-            map(
-                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                fruit_chunk,
-            )
-        )
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
-        del self.fruit_top
+    def _process_eof(self, client_token: str):
+        logging.info("Received EOF for client token")
+        count = self._eof_seen.get(client_token, 0) + 1
+        self._eof_seen[client_token] = count
+        if count < SUM_AMOUNT:
+            return
+
+        partial = self._partial_pairs(client_token)
+        payload = message_protocol.internal.serialize([client_token, partial])
+        self.output_queue.send(payload)
+
+        self._eof_seen.pop(client_token, None)
+        self._by_client.pop(client_token, None)
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Process message")
-        fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
-            self._process_data(*fields)
-        else:
-            self._process_eof()
-        ack()
+        try:
+            logging.info("Process message")
+            fields = message_protocol.internal.deserialize(message)
+            if len(fields) == 3:
+                self._process_data(fields[0], fields[1], int(fields[2]))
+            elif len(fields) == 1:
+                self._process_eof(fields[0])
+            ack()
+        except Exception:
+            nack()
+
+    def _shutdown(self, signum, frame):
+        logging.info("Aggregation received shutdown signal")
+        try:
+            self.input_exchange.stop_consuming()
+        except Exception:
+            pass
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        import signal
+
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
+
+        try:
+            self.input_exchange.start_consuming(self.process_messsage)
+        finally:
+            try:
+                self.input_exchange.close()
+            except Exception:
+                pass
+            try:
+                self.output_queue.close()
+            except Exception:
+                pass
 
 
 def main():
