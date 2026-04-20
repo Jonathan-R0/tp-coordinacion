@@ -109,6 +109,7 @@ class SumFilter:
             self.input_queue.schedule_on_consumer_thread(self._drain_coord_messages)
             ack()
         except Exception:
+            logging.exception("Sum coordination fan-in failed")
             nack()
 
     def process_data_messsage(self, message, ack, nack):
@@ -129,6 +130,7 @@ class SumFilter:
             self._drain_coord_messages()
             ack()
         except Exception:
+            logging.exception("Sum failed processing input message")
             nack()
 
     def _fanout_listen(self):
@@ -139,12 +141,12 @@ class SumFilter:
         try:
             self.input_queue.stop_consuming()
         except Exception:
-            pass
+            logging.warning("Sum: stop_consuming on input queue failed during shutdown", exc_info=True)
         try:
             if self._fanout_sub:
                 self._fanout_sub.stop_consuming()
         except Exception:
-            pass
+            logging.warning("Sum: stop_consuming on fanout subscription failed during shutdown", exc_info=True)
 
     def start(self):
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -159,28 +161,32 @@ class SumFilter:
             try:
                 self.input_queue.close()
             except Exception:
-                pass
+                logging.warning("Sum: failed to close input queue", exc_info=True)
             try:
                 if self._fanout_pub:
                     self._fanout_pub.close()
             except Exception:
-                pass
+                logging.warning("Sum: failed to close coordination fanout publisher", exc_info=True)
             try:
                 if self._fanout_sub:
                     self._fanout_sub.close()
             except Exception:
-                pass
+                logging.warning("Sum: failed to close coordination fanout subscriber", exc_info=True)
             for exch in self.data_output_exchanges:
                 try:
                     exch.close()
                 except Exception:
-                    pass
+                    logging.warning("Sum: failed to close aggregation output exchange", exc_info=True)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    sum_filter = SumFilter()
-    sum_filter.start()
+    try:
+        sum_filter = SumFilter()
+        sum_filter.start()
+    except Exception:
+        logging.exception("Sum fatal error")
+        return 1
     return 0
 
 

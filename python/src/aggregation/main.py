@@ -59,6 +59,7 @@ class AggregationFilter:
                 self._process_eof(fields[0])
             ack()
         except Exception:
+            logging.exception("Aggregation failed processing message")
             nack()
 
     def _shutdown(self, signum, frame):
@@ -66,7 +67,9 @@ class AggregationFilter:
         try:
             self.input_exchange.stop_consuming()
         except Exception:
-            pass
+            logging.warning(
+                "Aggregation: stop_consuming failed during shutdown", exc_info=True
+            )
 
     def start(self):
         import signal
@@ -80,17 +83,21 @@ class AggregationFilter:
             try:
                 self.input_exchange.close()
             except Exception:
-                pass
+                logging.warning("Aggregation: failed to close input exchange", exc_info=True)
             try:
                 self.output_queue.close()
             except Exception:
-                pass
+                logging.warning("Aggregation: failed to close output queue", exc_info=True)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    aggregation_filter = AggregationFilter()
-    aggregation_filter.start()
+    try:
+        aggregation_filter = AggregationFilter()
+        aggregation_filter.start()
+    except Exception:
+        logging.exception("Aggregation fatal error")
+        return 1
     return 0
 
 

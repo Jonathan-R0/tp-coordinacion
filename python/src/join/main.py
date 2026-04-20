@@ -49,6 +49,7 @@ class JoinFilter:
             del self._pending[client_token]
             ack()
         except Exception:
+            logging.exception("Join failed processing message")
             nack()
 
     def _shutdown(self, signum, frame):
@@ -56,7 +57,7 @@ class JoinFilter:
         try:
             self.input_queue.stop_consuming()
         except Exception:
-            pass
+            logging.warning("Join: stop_consuming failed during shutdown", exc_info=True)
 
     def start(self):
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -68,18 +69,21 @@ class JoinFilter:
             try:
                 self.input_queue.close()
             except Exception:
-                pass
+                logging.warning("Join: failed to close input queue", exc_info=True)
             try:
                 self.output_queue.close()
             except Exception:
-                pass
+                logging.warning("Join: failed to close output queue", exc_info=True)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    join_filter = JoinFilter()
-    join_filter.start()
-
+    try:
+        join_filter = JoinFilter()
+        join_filter.start()
+    except Exception:
+        logging.exception("Join fatal error")
+        return 1
     return 0
 
 
