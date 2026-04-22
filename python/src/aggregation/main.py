@@ -21,6 +21,7 @@ class AggregationFilter:
         )
         self._by_client = {}
         self._eof_seen = {}
+        self._seen_data = {}
 
     def _partial_pairs(self, client_token: str):
         bucket = self._by_client.get(client_token, {})
@@ -29,34 +30,41 @@ class AggregationFilter:
         chunk = items[:TOP_SIZE]
         return [[fi.fruit, fi.amount] for fi in chunk]
 
-    def _process_data(self, client_token: str, fruit: str, amount: int):
+    def _process_data(self, client_token: str, sum_id: int, fruit: str, amount: int):
         logging.info("Processing data message")
+        dedupe_key = (sum_id, fruit)
+        seen = self._seen_data.setdefault(client_token, set())
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+
         bucket = self._by_client.setdefault(client_token, {})
         current = bucket.get(fruit, fruit_item.FruitItem(fruit, 0))
         bucket[fruit] = current + fruit_item.FruitItem(fruit, amount)
 
-    def _process_eof(self, client_token: str):
+    def _process_eof(self, client_token: str, sum_id: int):
         logging.info("Received EOF for client token")
-        count = self._eof_seen.get(client_token, 0) + 1
-        self._eof_seen[client_token] = count
-        if count < SUM_AMOUNT:
+        seen = self._eof_seen.setdefault(client_token, set())
+        seen.add(sum_id)
+        if len(seen) < SUM_AMOUNT:
             return
 
         partial = self._partial_pairs(client_token)
-        payload = message_protocol.internal.serialize([client_token, partial])
+        payload = message_protocol.internal.serialize([client_token, ID, partial])
         self.output_queue.send(payload)
 
         self._eof_seen.pop(client_token, None)
         self._by_client.pop(client_token, None)
+        self._seen_data.pop(client_token, None)
 
     def process_messsage(self, message, ack, nack):
         try:
             logging.info("Process message")
             fields = message_protocol.internal.deserialize(message)
-            if len(fields) == 3:
-                self._process_data(fields[0], fields[1], int(fields[2]))
-            elif len(fields) == 1:
-                self._process_eof(fields[0])
+            if len(fields) == 4:
+                self._process_data(fields[0], int(fields[1]), fields[2], int(fields[3]))
+            elif len(fields) == 2:
+                self._process_eof(fields[0], int(fields[1]))
             ack()
         except Exception:
             logging.exception("Aggregation failed processing message")

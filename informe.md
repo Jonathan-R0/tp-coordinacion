@@ -2,7 +2,7 @@
 
 El trabajo práctico se realizó sobre el módulo de Python.
 
-## Protocolo interno (colas RabbitMQ)
+## Protocolo Interno
 
 Los cuerpos de mensaje son listas JSON. Veamos la comunicación de a tramos entre los tipos de nodos:
 
@@ -19,14 +19,14 @@ El `MessageHandler` genera el `token` para cada cliente, lo incluye en los mensa
 
 | Mensaje | Significado |
 |---------|-------------|
-| `[token, fruta, cantidad]` | Aporte de Sum al shard que corresponde a esa fruta. |
-| `[token]` | EOF del Sum: cada Sum envía una por cada Aggregator al cerrar ese cliente. |
+| `[token, sum_id, fruta, cantidad]` | Aporte de un Sum específico al nodo que corresponde a esa fruta. |
+| `[token, sum_id]` | EOF del Sum: cada Sum envía uno por cada Aggregator al cerrar ese cliente. |
 
 ### Aggregator hacia Join
 
 | Mensaje | Significado |
 |---------|-------------|
-| `[token, lista_parcial]` | `lista_parcial` es una lista de pares `[fruta, cantidad]` con el top parcial (hasta `TOP_SIZE` frutas) para ese cliente. |
+| `[token, aggregation_id, lista_parcial]` | `lista_parcial` es una lista de pares `[fruta, cantidad]` con el top parcial (hasta `TOP_SIZE` frutas) para ese cliente, "firmada" por el Aggregator que lo mandó. |
 
 ### Join hacia Gateway
 
@@ -58,7 +58,7 @@ Solo una réplica recibe el EOF `[token]` que envía el gateway para un cliente 
 
 Para que todas las Sum envien su estado parcial para ese `token`, el nodo Sum que recibe el EOF del gateway publica el mismo `token` en un fanout llamado `{SUM_PREFIX}_eof_fanout`. Cada Sum tiene una cola propia enlazada a ese fanout y recibe una copia del mensaje.
 
-Así todas aplican `_flush_client(token)`: envían sus filas acumuladas para ese cliente hacia los nodos correctos y, además, envían el `[token]` a cada routing key de Aggregator.
+Así todas aplican `_flush_client(token)`: envían sus filas acumuladas para ese cliente hacia los nodos correctos y además envían el EOF `[token, sum_id]` a cada routing key de Aggregator.
 
 ### Condición de carrera EOF vs último dato
 
@@ -76,11 +76,13 @@ Si `SUM_AMOUNT == 1`, no hace falta fanout ni cola de coordinación: el EOF lleg
 
 Cada Aggregator mantiene, por `token`, el acumulado de frutas que le llegan por su shard.
 
-Los mensajes `[token]` incrementan un contador por `token`. Cuando llegaron `SUM_AMOUNT` EOF (uno por cada réplica Sum), se considera que todas las Sum ya enviaron sus aportes y los EOF de barrera para ese shard. Recién ahí se calcula el top parcial y se envía `[token, lista_parcial]` a Join.
+Los mensajes de EOF `[token, sum_id]` se registran en un conjunto por `token`. Cuando el conjunto alcanza tamaño `SUM_AMOUNT` (un Sum distino por cada entrada), se considera que todas los Sum ya enviaron sus aportes y los EOF de barrera para ese nodo. Recién ahí se calcula el top parcial y se envía `[token, aggregation_id, lista_parcial]` a Join.
 
 ## Join fusionado y resultado único por cliente
 
-Join agrupa mensajes por `token`. Necesita recibir exactamente `AGGREGATION_AMOUNT` parciales distintos (uno por cada Aggregator) antes de fusionar: suma cantidades por fruta con `FruitItem`, ordena según la comparación del ítem, toma los `TOP_SIZE` y envía `[token, lista_final]` al gateway.
+Join agrupa mensajes por `token` y por `aggregation_id`. Necesita recibir exactamente `AGGREGATION_AMOUNT` parciales distintos (uno por cada Aggregator) antes de fusionar: suma cantidades por fruta con `FruitItem`, ordena según la comparación del ítem, toma los `TOP_SIZE` y envía `[token, lista_final]` al gateway.
+
+Si llega un redelivery de un parcial ya recibido para el mismo `(token, aggregation_id)`, el valor se reemplaza/ignora sin cambiar la cantidad de parciales únicos esperados.
 
 La cola hacia el gateway es consumida por un solo proceso que entrega el resultado al handler del cliente si el token recibido coincide.
 

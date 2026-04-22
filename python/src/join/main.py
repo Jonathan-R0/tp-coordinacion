@@ -36,14 +36,14 @@ class JoinFilter:
     def process_messsage(self, message, ack, nack):
         try:
             logging.info("Received partial top")
-            client_token, partial = message_protocol.internal.deserialize(message)
-            bucket = self._pending.setdefault(client_token, [])
-            bucket.append(partial)
+            client_token, aggregation_id, partial = message_protocol.internal.deserialize(message)
+            bucket = self._pending.setdefault(client_token, {})
+            bucket[int(aggregation_id)] = partial
             if len(bucket) < AGGREGATION_AMOUNT:
                 ack()
                 return
 
-            merged = _merge_partials(bucket)
+            merged = _merge_partials(bucket.values())
             out = message_protocol.internal.serialize([client_token, merged])
             self.output_queue.send(out)
             del self._pending[client_token]

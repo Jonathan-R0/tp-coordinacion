@@ -72,11 +72,11 @@ class SumFilter:
         for fruit, item in fruits.items():
             shard = self._aggregator_shard(fruit)
             payload = message_protocol.internal.serialize(
-                [client_token, fruit, item.amount]
+                [client_token, self._id, fruit, item.amount]
             )
             self.data_output_exchanges[shard].send(payload)
 
-        eof_body = message_protocol.internal.serialize([client_token])
+        eof_body = message_protocol.internal.serialize([client_token, self._id])
         for j in range(self._aggregation_amount):
             self.data_output_exchanges[j].send(eof_body)
 
